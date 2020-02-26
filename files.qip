@@ -18,3 +18,4 @@ set_global_assignment -name VERILOG_FILE mouse.v
 set_global_assignment -name SYSTEMVERILOG_FILE keyboard.sv
 set_global_assignment -name SDC_FILE "ZX-Spectrum.sdc"
 set_global_assignment -name SYSTEMVERILOG_FILE "ZX-Spectrum.sv"
+set_global_assignment -name VERILOG_FILE sys/joydb9md.v

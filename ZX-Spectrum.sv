@@ -116,13 +116,22 @@ module emu
 	// 1 - D-/TX
 	// 2..6 - USR2..USR6
 	// Set USER_OUT to 1 to read from USER_IN.
-	input   [6:0] USER_IN,
-	output  [6:0] USER_OUT,
+	output	USER_OSD,
+output	USER_MODE,
+input	[7:0] USER_IN,
+output	[7:0] USER_OUT,
 
 	input         OSD_STATUS
 );
 
-assign USER_OUT = '1;
+//assign USER_OUT  = '1;
+
+wire   joy_split, joy_mdsel;
+wire   [5:0] joy_in = {USER_IN[6],USER_IN[3],USER_IN[5],USER_IN[7],USER_IN[1],USER_IN[2]};
+assign USER_OUT  = |status[31:30] ? {3'b111,joy_split,3'b111,joy_mdsel} : '1;
+assign USER_MODE = |status[31:30] ;
+assign USER_OSD  = joydb9md_1[7] & joydb9md_1[5];
+
 assign VGA_F1 = 0;
 assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
@@ -165,6 +174,8 @@ localparam CONF_STR = {
 	"-;",
 	"OKL,General Sound,512KB,1MB,2MB,Disabled;",
 	"O23,Stereo mix,none,25%,50%,100%;",
+	"-;",
+	"OUV,Serial SNAC DB9MD,Off,1 Player,2 Players;",	
 	"-;",
 	"OHJ,Joystick,Kempston,Sinclair I,Sinclair II,Sinclair I+II,Cursor;",
 	"OMO,CPU Speed,Original,7MHz,14MHz,28MHz,56MHz;",
@@ -288,8 +299,8 @@ end
 wire [10:0] ps2_key;
 wire [24:0] ps2_mouse;
 
-wire [15:0] joystick_0;
-wire [15:0] joystick_1;
+wire [15:0] joystick_0_USB;
+wire [15:0] joystick_1_USB;
 wire  [1:0] buttons;
 wire        forced_scandoubler;
 wire [31:0] status;
@@ -328,6 +339,39 @@ reg  [31:0] status_out;
 
 wire [21:0] gamma_bus;
 
+wire [15:0] joystick_0 = |status[31:30] ? {
+	joydb9md_1[6] | joydb9md_1[4] | joydb9md_1[5], // btn_fire	-> 4 * A,B or C
+	joydb9md_1[3], // btn_up	-> 3 * U
+	joydb9md_1[2], // btn_down	-> 2 * D
+	joydb9md_1[1], // btn_left	-> 1 * L
+	joydb9md_1[0], // btn_righ	-> 0 * R 
+	} 
+	: joystick_0_USB;
+
+wire [15:0] joystick_1 =  status[31]    ? {
+	joydb9md_2[6] | joydb9md_2[4] | joydb9md_2[5], // btn_fire	-> 4 * A,B or C
+	joydb9md_2[3], // btn_up	-> 3 * U
+	joydb9md_2[2], // btn_down	-> 2 * D
+	joydb9md_2[1], // btn_left	-> 1 * L
+	joydb9md_2[0], // btn_right	-> 0 * R 
+	} 
+	: status[30] ? joystick_0_USB : joystick_1_USB;
+
+
+
+reg [15:0] joydb9md_1,joydb9md_2;
+joy_db9md joy_db9md
+(
+  .clk       ( clk_sys    ), //35-50MHz
+  .joy_split ( joy_split  ),
+  .joy_mdsel ( joy_mdsel  ),
+  .joy_in    ( joy_in     ),
+  .joystick1 ( joydb9md_1 ),
+  .joystick2 ( joydb9md_2 )	  
+);
+
+
+
 hps_io #(.STRLEN(($size(CONF_STR)>>3)+5)) hps_io
 (
 	.clk_sys(clk_sys),
@@ -338,8 +382,9 @@ hps_io #(.STRLEN(($size(CONF_STR)>>3)+5)) hps_io
 	.ps2_key(ps2_key),
 	.ps2_mouse(ps2_mouse),
 
-	.joystick_0(joystick_0),
-	.joystick_1(joystick_1),
+	.joystick_0(joystick_0_USB),
+	.joystick_1(joystick_1_USB),
+	.joy_raw({joydb9md_1[4],joydb9md_1[6],joydb9md_1[3:0]}),
 	.buttons(buttons),
 	.forced_scandoubler(forced_scandoubler),
 	.status(status),
