@@ -375,8 +375,8 @@ end
 wire [10:0] ps2_key;
 wire [24:0] ps2_mouse;
 
-wire [15:0] joystick_0_USB;
-wire [15:0] joystick_1_USB;
+wire [15:0] joy0_USB;
+wire [15:0] joy1_USB;
 wire  [1:0] buttons;
 wire        forced_scandoubler;
 wire [63:0] status;
@@ -418,8 +418,8 @@ wire        ioctl_wait;
 wire [21:0] gamma_bus;
 
 // F2 F1 U D L R 
-wire [31:0] joystick_0 = joydb_1ena ? (OSD_STATUS? 32'b000000 : {joydb_1[6],joydb_1[5]|joydb_1[4],joydb_1[3:0]}) : joystick_0_USB;
-wire [31:0] joystick_1 = joydb_2ena ? (OSD_STATUS? 32'b000000 : {joydb_2[6],joydb_2[5]|joydb_2[4],joydb_2[3:0]}) : joydb_1ena ? joystick_0_USB : joystick_1_USB;
+wire [31:0] joy0 = joydb_1ena ? (OSD_STATUS? 32'b000000 : {joydb_1[6],joydb_1[5]|joydb_1[4],joydb_1[3:0]}) : joy0_USB;
+wire [31:0] joy1 = joydb_2ena ? (OSD_STATUS? 32'b000000 : {joydb_2[6],joydb_2[5]|joydb_2[4],joydb_2[3:0]}) : joydb_1ena ? joy0_USB : joy1_USB;
 
 wire [15:0] joydb_1 = JOY_FLAG[2] ? JOYDB9MD_1 : JOY_FLAG[1] ? JOYDB15_1 : '0;
 wire [15:0] joydb_2 = JOY_FLAG[2] ? JOYDB9MD_2 : JOY_FLAG[1] ? JOYDB15_2 : '0;
@@ -463,8 +463,8 @@ hps_io #(.STRLEN(($size(CONF_STR)>>3)+5), .VDNUM(2)) hps_io
 	.ps2_key(ps2_key),
 	.ps2_mouse(ps2_mouse),
 
-	.joystick_0(joystick_0_USB),
-	.joystick_1(joystick_1_USB),
+	.joystick_0(joy0_USB),
+	.joystick_1(joy1_USB),
 	.joy_raw(OSD_STATUS? (joydb_1[5:0]|joydb_2[5:0]) : 6'b000000 ),
 	.buttons(buttons),
 	.forced_scandoubler(forced_scandoubler),
