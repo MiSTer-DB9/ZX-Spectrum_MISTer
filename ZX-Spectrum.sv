@@ -268,7 +268,7 @@ localparam CONF_PLUS3 = "(+3) ";
 // 0         1         2         3          4         5         6
 // 01234567890123456789012345678901 23456789012345678901234567890123
 // 0123456789ABCDEFGHIJKLMNOPQRSTUV 0123456789ABCDEFGHIJKLMNOPQRSTUV
-// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX XXXX
+//  XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX XXXXXX
 
 `include "build_id.v"
 localparam CONF_STR = {
@@ -306,6 +306,8 @@ localparam CONF_STR = {
 	"P2o01,MMC Mode,Auto(VHD),SD Card 14MHz,SD Card 28MHz;",
 	"P2OUV,MMC Version,DivMMC+ESXDOS,DivMMC,ZXMMC;",
 
+	"-;",
+	"o45,Keyboard,Normal,Ghosting,Recreated ZX,Recr+Ghosting;",
 	"-;",
 	"oUV,UserIO Joystick,Off,DB9MD,DB15 ;",
 	"oT,UserIO Players, 1 Player,2 Players;",	
@@ -1069,6 +1071,8 @@ end
 wire [11:1] Fn;
 wire  [2:0] mod;
 wire  [4:0] key_data;
+wire recreated_zx = status[37];
+wire ghosting     = status[36];
 keyboard kbd( .* );
 
 wire  [7:0] mouse_data;
