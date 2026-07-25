@@ -190,6 +190,11 @@ architecture rtl of T80 is
 	signal IncDecZ              : std_logic;
 	signal last_B               : std_logic_vector(7 downto 0);
 
+	-- Q register for Zilog SCF/CCF undocumented flag behavior
+	-- Captures F[5,3] (YF,XF) after flag-modifying instructions
+	signal Q_reg                : std_logic_vector(7 downto 0);
+	signal F_last               : std_logic_vector(7 downto 0);
+
 	-- ALU signals
 	signal BusB                 : std_logic_vector(7 downto 0);
 	signal BusA                 : std_logic_vector(7 downto 0);
@@ -427,6 +432,8 @@ begin
 			PreserveC_r <= '0';
 			XY_Ind <= '0';
 			I_RXDD <= '0';
+			Q_reg <= (others => '0');
+			F_last <= (others => '1');
 
 		elsif rising_edge(CLK_n) then
 
@@ -666,26 +673,38 @@ begin
 								F(Flag_N) <= '1';
 							end if;
 							if I_CCF = '1' then
-								-- CCF
+								-- CCF: Zilog Z80 behavior
+								-- Undocumented YF/XF: (A | (F & ~Q)) & 0x28
 								F(Flag_C) <= not F(Flag_C);
-								F(Flag_Y) <= ACC(5);
+								F(Flag_Y) <= ACC(5) or (F(Flag_Y) and not Q_reg(Flag_Y));
 								F(Flag_H) <= F(Flag_C);
-								F(Flag_X) <= ACC(3);
+								F(Flag_X) <= ACC(3) or (F(Flag_X) and not Q_reg(Flag_X));
 								F(Flag_N) <= '0';
+								Q_reg(Flag_Y) <= ACC(5) or (F(Flag_Y) and not Q_reg(Flag_Y));
+								Q_reg(Flag_X) <= ACC(3) or (F(Flag_X) and not Q_reg(Flag_X));
 							end if;
 							if I_SCF = '1' then
-								-- SCF
+								-- SCF: Zilog Z80 behavior
+								-- Undocumented YF/XF: (A | (F & ~Q)) & 0x28
 								F(Flag_C) <= '1';
-								F(Flag_Y) <= ACC(5);
+								F(Flag_Y) <= ACC(5) or (F(Flag_Y) and not Q_reg(Flag_Y));
 								F(Flag_H) <= '0';
-								F(Flag_X) <= ACC(3);
+								F(Flag_X) <= ACC(3) or (F(Flag_X) and not Q_reg(Flag_X));
 								F(Flag_N) <= '0';
+								Q_reg(Flag_Y) <= ACC(5) or (F(Flag_Y) and not Q_reg(Flag_Y));
+								Q_reg(Flag_X) <= ACC(3) or (F(Flag_X) and not Q_reg(Flag_X));
 							end if;
 						end if;
 					end if;
 
 					if (TState = 2 and I_BTR = '1' and IR(0) = '1') or (TState = 1 and I_BTR = '1' and IR(0) = '0') then
-						ioq := ('0' & DI_Reg) + ('0' & std_logic_vector(ID16(7 downto 0)));
+						-- INI/IND (IR(0)=0): T = M + (C±1), WZ(7:0) has C±1 from MCycle 1
+						-- OUTI/OUTD (IR(0)=1): T = M + L, ID16(7:0) has L±1
+						if IR(0) = '0' then
+							ioq := ('0' & DI_Reg) + ('0' & WZ(7 downto 0));
+						else
+							ioq := ('0' & DI_Reg) + ('0' & std_logic_vector(ID16(7 downto 0)));
+						end if;
 						F(Flag_N) <= DI_Reg(7);
 						F(Flag_C) <= ioq(8);
 						F(Flag_H) <= ioq(8);
@@ -711,17 +730,20 @@ begin
 							F(Flag_X) <= pc_tmp(11);
 							F(Flag_Y) <= pc_tmp(13);
 							if BTR_r2 = '1' then
+								-- INIR/INDR/OTIR/OTDR repeat: adjust HF and PF
+								-- balu = B-1 if CF&NF, B+1 if CF&!NF, else B
 								n := last_B;
 								if F(Flag_C) = '1' then
 									if F(Flag_N) = '1' then
 										F(Flag_H) <= not (last_B(0) or last_B(1) or last_B(2) or last_B(3));
-										n:= n - "1";
+										n := last_B - "1";
 									else
 										F(Flag_H) <= last_B(0) and last_B(1) and last_B(2) and last_B(3);
-										n:= n + "1";
+										n := last_B + "1";
 									end if;
 								end if;
-								F(Flag_P) <= not (F(Flag_P) xor n(0) xor n(1) xor n(2));
+								-- PF: XOR with parity of (balu & 7)
+								F(Flag_P) <= F(Flag_P) xor (n(0) xor n(1) xor n(2));
 							end if;
 						end if;
 						if RstP = '1' then
@@ -912,6 +934,23 @@ begin
 					if XYbit_undoc='1' then
 						DO <= ALU_Q;
 					end if;
+				end if;
+
+				-- Q register update for Zilog SCF/CCF behavior
+				-- At end of instruction: if flags changed, Q = F & 0x28
+				-- If flags didn't change and not SCF/CCF, Q = 0
+				-- SCF/CCF update Q internally, so skip them here
+				if T_Res = '1' and Mode /= 3 then
+					if I_SCF = '0' and I_CCF = '0' then
+						if F /= F_last then
+							Q_reg(Flag_Y) <= F(Flag_Y);
+							Q_reg(Flag_X) <= F(Flag_X);
+						else
+							Q_reg(Flag_Y) <= '0';
+							Q_reg(Flag_X) <= '0';
+						end if;
+					end if;
+					F_last <= F;
 				end if;
 			end if;
 		end if;
