@@ -199,9 +199,29 @@ reg   [2:0] snap_border;
 reg   [7:0] snap_1ffd;
 reg   [7:0] snap_7ffd;
 
+// SNA 128K state machine states
+localparam SNA128_IDLE    = 3'd0;
+localparam SNA128_PENDING = 3'd1; // Detect 48K vs 128K
+localparam SNA128_EXT     = 3'd2; // Parse 4-byte extended header
+localparam SNA128_REPLAY  = 3'd3; // Replay BRAM buffer to page N
+localparam SNA128_PAGES   = 3'd4; // Load remaining RAM pages
+localparam SNA128_DONE    = 3'd5; // All pages loaded, wait for download end
+
+reg [2:0]  sna128_state = SNA128_IDLE;
+reg [1:0]  sna128_ext_cnt;
+reg [2:0]  sna128_page_n;         // Page N from 7FFD[2:0]
+reg [13:0] sna128_replay_addr;    // BRAM replay read/write counter
+reg        sna128_replay_phase;   // 0=present address, 1=capture data & write
+reg [13:0] sna128_page_addr;      // Offset within current remaining page
+reg [2:0]  sna128_cur_page;       // Current remaining page being loaded
+
+// Bypass stays active in DONE so the registered write of the final page
+// byte is not remapped by the 48K address translation below.
+wire sna128_bypass = (sna128_state == SNA128_REPLAY) || (sna128_state == SNA128_PAGES) || (sna128_state == SNA128_DONE);
+
 always_comb begin
 	addr = addr_pre;
-	if(hdrv1 || snap_sna) begin
+	if(!sna128_bypass && (hdrv1 || snap_sna)) begin
 		case(addr_pre[17:14])
 				0: addr[16:14] = 5;
 				1: addr[16:14] = 2;
@@ -210,6 +230,33 @@ always_comb begin
 		endcase
 	end
 end
+
+// Combinational: next remaining page (skip 2, 5, and N)
+reg [3:0] sna128_next_page;
+always_comb begin
+	sna128_next_page = {1'b0, sna128_cur_page} + 1'd1;
+	if(sna128_next_page < 4'd8 && (sna128_next_page == 4'd2 || sna128_next_page == 4'd5 || sna128_next_page[2:0] == sna128_page_n))
+		sna128_next_page = sna128_next_page + 1'd1;
+	if(sna128_next_page < 4'd8 && (sna128_next_page == 4'd2 || sna128_next_page == 4'd5 || sna128_next_page[2:0] == sna128_page_n))
+		sna128_next_page = sna128_next_page + 1'd1;
+end
+
+// 16KB dual-port BRAM buffer for third bank (destination page unknown until ext header)
+wire [7:0] bram_rd_data;
+wire [13:0] bram_rd_addr = sna128_replay_addr;
+
+dpram #(.DATAWIDTH(8), .ADDRWIDTH(14)) sna128_buf
+(
+	.clock(clk_sys),
+	.address_a(addr_pre[13:0]),
+	.data_a(snap_data),
+	.wren_a(snap_wr & snap_sna & snap_reset & (addr_pre[17:14] == 2'b10)),
+	.q_a(),
+	.address_b(bram_rd_addr),
+	.data_b(8'd0),
+	.wren_b(1'b0),
+	.q_b(bram_rd_data)
+);
 
 reg        hdrv1;
 reg  [7:0] snap_hdrlen;
@@ -238,18 +285,26 @@ always_ff @(posedge clk_sys) begin
 		snap_hdrlen <= snap_sna ? 8'd27 : 8'd30;
 		snap_reset <= 1;
 		snap_hw <= 0;
+		sna128_state <= SNA128_IDLE;
 	end
 
 	//finish download
 	if(old_download && ~ioctl_download) begin
+		sna128_state <= SNA128_IDLE;
 		if(snap_hw) begin
 			snap_REGSet <= 1;
-			snap_hwset <= 1;
 			hold <= '1;
+			// Only change machine type if memory architecture differs
+			// (preserve Pentagon timing when loading 128K snapshot on Pentagon)
+			if(snap_hw[4:2] == hw_ack[4:2]) begin
+				snap_reset <= 0; // Compatible - skip hw change, exit reset immediately
+			end else begin
+				snap_hwset <= 1; // Incompatible - request machine type change
+			end
 		end
 		else snap_reset <= 0; // unsupported snapshot loaded - just exit from reset.
 	end
-	
+
 	//wait for confirmation from HPS
 	if(snap_hwset && (snap_hw == hw_ack)) begin
 		snap_hwset <= 0;
@@ -262,7 +317,99 @@ always_ff @(posedge clk_sys) begin
 		else snap_REGSet <= 0;
 	end
 
-	if(ioctl_download & ioctl_wr) begin
+	// SNA 128K state machine
+	if(sna128_state != SNA128_IDLE) begin
+		case(sna128_state)
+			SNA128_PENDING: begin
+				// sz reached 0 for SNA: if more data arrives → 128K, else 48K
+				if(ioctl_wr) begin
+					// 128K confirmed: first byte is PC low
+					snap_REG[71:64] <= ioctl_data;
+					sna128_ext_cnt <= 1;
+					sna128_state <= SNA128_EXT;
+					// synthesis translate_off
+					$display("SNA128: PC_low=0x%02X", ioctl_data);
+					// synthesis translate_on
+				end
+				// If download ends → 48K (handled by download-end logic)
+			end
+
+			SNA128_EXT: begin
+				if(ioctl_wr) begin
+					case(sna128_ext_cnt)
+						1: begin
+							snap_REG[79:72] <= ioctl_data; // PC high
+							// synthesis translate_off
+							$display("SNA128: PC_high=0x%02X -> PC=0x%02X%02X", ioctl_data, ioctl_data, snap_REG[71:64]);
+							// synthesis translate_on
+						end
+						2: begin
+							snap_7ffd <= ioctl_data;
+							sna128_page_n <= ioctl_data[2:0];
+							snap_hw <= ARCH_ZX128;
+							// synthesis translate_off
+							$display("SNA128: 7FFD=0x%02X", ioctl_data);
+							// synthesis translate_on
+						end
+						3: begin
+							// TR-DOS flag (4th ext byte, ignored for now)
+							sna128_state <= SNA128_REPLAY;
+							sna128_replay_addr <= 0;
+							sna128_replay_phase <= 0;
+							snap_wait <= 1; // Pause stream during BRAM replay
+						end
+					endcase
+					sna128_ext_cnt <= sna128_ext_cnt + 1'd1;
+				end
+			end
+
+			SNA128_REPLAY: begin
+				// Replay buffered third bank from BRAM to correct SDRAM page N.
+				// BRAM read data arrives one clock after the address (registered
+				// address in altsyncram), so each byte takes two cycles.
+				// Must also wait for ram_ready to avoid overrunning SDRAM.
+				if(!sna128_replay_phase) begin
+					sna128_replay_phase <= 1;
+				end else if(ram_ready) begin
+					sna128_replay_phase <= 0;
+					addr_pre <= {4'b0000, sna128_page_n, sna128_replay_addr};
+					snap_data <= bram_rd_data;
+					snap_wr <= 1;
+
+					if(sna128_replay_addr == 14'h3FFF) begin
+						sna128_state <= SNA128_PAGES;
+						sna128_cur_page <= (sna128_page_n == 3'd0) ? 3'd1 : 3'd0;
+						sna128_page_addr <= 0;
+						snap_wait <= 0; // Resume stream for remaining pages
+					end else begin
+						sna128_replay_addr <= sna128_replay_addr + 1'd1;
+					end
+				end
+			end
+
+			SNA128_PAGES: begin
+				// Load remaining RAM pages from byte stream
+				if(ioctl_wr) begin
+					addr_pre <= {4'b0000, sna128_cur_page, sna128_page_addr};
+					snap_data <= ioctl_data;
+					snap_wr <= 1;
+
+					if(sna128_page_addr == 14'h3FFF) begin
+						sna128_page_addr <= 0;
+						if(sna128_next_page < 4'd8) begin
+							sna128_cur_page <= sna128_next_page[2:0];
+						end else begin
+							sna128_state <= SNA128_DONE;
+							finish <= 1;
+						end
+					end else begin
+						sna128_page_addr <= sna128_page_addr + 1'd1;
+					end
+				end
+			end
+		endcase
+	end
+	else if(ioctl_download & ioctl_wr) begin
 		if (ioctl_addr<snap_hdrlen) begin
 			if (!snap_sna) case(ioctl_addr[6:0]) // Z80
 				 0: snap_REG[7:0]     <= ioctl_data; //a
@@ -352,8 +499,8 @@ always_ff @(posedge clk_sys) begin
 				 4: snap_REG[175:168] <= ioctl_data; //d'
 				 5: snap_REG[151:144] <= ioctl_data; //c'
 				 6: snap_REG[159:152] <= ioctl_data; //b'
-				 7: snap_REG[23:16]   <= ioctl_data; //a'
-				 8: snap_REG[31:24]   <= ioctl_data; //f'
+				 7: snap_REG[31:24]   <= ioctl_data; //f' (SNA stores AF' word low-byte-first: F' then A')
+				 8: snap_REG[23:16]   <= ioctl_data; //a'
 				 9: snap_REG[119:112] <= ioctl_data; //l
 				10: snap_REG[127:120] <= ioctl_data; //h
 				11: snap_REG[103:96]  <= ioctl_data; //e
@@ -364,10 +511,10 @@ always_ff @(posedge clk_sys) begin
 				16: snap_REG[207:200] <= ioctl_data; //yh
 				17: snap_REG[135:128] <= ioctl_data; //xl
 				18: snap_REG[143:136] <= ioctl_data; //xh
-				19: snap_REG[211:210] <= {ioctl_data[2], 1'b0}; //iff2,iff1
+				19: snap_REG[211:210] <= {ioctl_data[2], ioctl_data[2]}; //iff2,iff1 (both from SNA flag)
 				20: snap_REG[47:40]   <= ioctl_data; //r
-				21: snap_REG[7:0]     <= ioctl_data; //a
-				22: snap_REG[15:8]    <= ioctl_data; //f
+				21: snap_REG[15:8]    <= ioctl_data; //f (SNA stores AF word low-byte-first: F then A)
+				22: snap_REG[7:0]     <= ioctl_data; //a
 				23: snap_REG[55:48]   <= ioctl_data; //spl
 				24: snap_REG[63:56]   <= ioctl_data; //sph
 				25: snap_REG[209:208] <= ioctl_data[1:0]; //im
@@ -443,14 +590,16 @@ always_ff @(posedge clk_sys) begin
 			if(comp_state>=3) begin
 				sz <= sz - 1'd1;
 				if(sz == 1) begin
-					if(snap_hdrlen == 30 || snap_sna) finish <= 1;
+					if(snap_hdrlen == 30) finish <= 1;
+					else if(snap_sna) sna128_state <= SNA128_PENDING;
 					else comp_state <= 0;
 				end
 			end
 		end
 	end
 
-	if(~snap_wr & snap_wait & ram_ready) begin
+	// RLE expansion drain (only when not in 128K state machine to avoid clearing snap_wait)
+	if(~snap_wr & snap_wait & ram_ready & (sna128_state == SNA128_IDLE)) begin
 		if(cnt) begin
 			addr_pre <= addr;
 			addr <= addr + 1'd1;
